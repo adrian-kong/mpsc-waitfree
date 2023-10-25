@@ -9,15 +9,15 @@ use core::ptr;
 use std::cell::Cell;
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
-use std::mem::MaybeUninit;
-use std::sync::atomic::Ordering::{Acquire, Release};
+use std::mem::{ManuallyDrop, MaybeUninit};
+use std::sync::atomic::Ordering::{Acquire, Release, SeqCst};
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::testabc::State::{Empty, Handled, Set};
 
 /// The number of nodes within a single buffer.
-const BUFFER_SIZE: usize = 10;
+pub const BUFFER_SIZE: usize = 5;
 
 /// Represents the state of a node within a buffer.
 #[repr(u8)]
@@ -58,8 +58,8 @@ impl PartialEq<State> for u8 {
 /// the actual data that has been enqueued. A node
 /// has a state which is updated during enqueue and
 /// dequeue operations.
-struct Node<T> {
-    data: MaybeUninit<T>,
+pub struct Node<T> {
+    pub(crate) data: MaybeUninit<T>,
     /// The state of the node needs to be atomic to make
     /// state changes visible to the dequeue thread.
     is_set: AtomicU8,
@@ -105,7 +105,7 @@ impl<T> Default for Node<T> {
 /// last buffer list in the queue.
 pub struct BufferList<T> {
     /// A fixed size vector of nodes that hold the data.
-    nodes: Vec<Node<T>>,
+    pub(crate) nodes: Vec<Node<T>>,
     /// A pointer to the previous buffer list.
     pub prev: *mut BufferList<T>,
     /// An atomic pointer to the next buffer list.
@@ -113,11 +113,11 @@ pub struct BufferList<T> {
     /// The position to read the next element from inside
     /// the buffer list. The head index is only updated
     /// by the dequeue thread.
-    head: usize,
+    pub head: usize,
     /// The position of that buffer list in the queue.
     /// That index is used to compute the number of elements
     /// previously added to the queue.
-    pos: usize,
+    pub pos: usize,
 }
 
 impl<T> BufferList<T> {
@@ -128,7 +128,6 @@ impl<T> BufferList<T> {
     pub fn with_prev(size: usize, pos: usize, prev: *mut BufferList<T>) -> Self {
         let mut curr_buffer = Vec::with_capacity(size);
         curr_buffer.resize_with(size, Node::default);
-
         BufferList {
             nodes: curr_buffer,
             prev,
@@ -162,8 +161,8 @@ unsafe impl<T> Sync for BufferList<T> {}
 /// ```
 #[derive(Debug)]
 pub struct MpscQueue<T> {
-    head_of_queue: Cell<*mut BufferList<T>>,
-    tail_of_queue: AtomicPtr<BufferList<T>>,
+    pub(crate) head_of_queue: Cell<*mut BufferList<T>>,
+    pub(crate) tail_of_queue: AtomicPtr<BufferList<T>>,
 
     buffer_size: usize,
     tail: AtomicUsize,
@@ -175,7 +174,6 @@ unsafe impl<T> Sync for MpscQueue<T> {}
 impl<T> MpscQueue<T> {
     pub fn new() -> Self {
         let head_of_queue = BufferList::new(BUFFER_SIZE, 1);
-        // move to heap
         let head = Box::new(head_of_queue);
         // forget about it but keep pointer
         let head = Box::into_raw(head);
@@ -194,150 +192,163 @@ impl<T> MpscQueue<T> {
         // Since this is called by multiple enqueue threads,
         // the generated index can be either past or before
         // the current tail buffer of the queue.
-        let location = self.tail.fetch_add(1, Ordering::SeqCst);
+        let location = self.tail.fetch_add(1, SeqCst);
         // Track if the element is inserted in the last buffer.
         let mut is_last_buffer = true;
         let mut temp_tail = unsafe { &mut *self.tail_of_queue.load(Acquire) };
-        // let mut num_elements = self.buffer_size * temp_tail.pos;
-        // println!("location={location} num_elem={num_elements}");
-        // while location >= num_elements {
-        //     let next = temp_tail.next.load(Acquire);
-        //     println!("{location} {num_elements} {}", next.is_null());
-        //     // create new buffer if reached end of tail buffer
-        //     if next.is_null() {
-        //         let new_buffer_ptr = self.allocate_buffer(temp_tail);
-        //         if temp_tail
-        //             .next
-        //             .compare_exchange(
-        //                 ptr::null_mut(),
-        //                 new_buffer_ptr,
-        //                 Ordering::SeqCst,
-        //                 Ordering::SeqCst,
-        //             )
-        //             .is_ok()
-        //         {
-        //             println!("ok!");
-        //             self.tail_of_queue.store(new_buffer_ptr, Release)
-        //         } else {
-        //             println!("err");
-        //             MpscQueue::drop_buffer(new_buffer_ptr)
-        //         }
-        //     }
-        //     temp_tail = unsafe { &mut *temp_tail.next.load(Acquire) };
-        //     num_elements = self.buffer_size * temp_tail.pos;
-        // }
-        //
-        // let mut prev_size = self.size_without_buffer(temp_tail);
-        // while location < prev_size {
-        //     temp_tail = unsafe { &mut *temp_tail.prev };
-        //     prev_size = self.size_without_buffer(temp_tail);
-        //     is_last_buffer = false;
-        // }
-        //
-        // unsafe {
-        //     temp_tail.nodes[location - prev_size].set_data(data);
-        // }
-        //
-        // // Optimization to reduce contention on the tail of the queue.
-        // // If the inserted element is the second entry in the
-        // // current buffer, we already allocate a new buffer and
-        // // append it to the queue.
-        // if location - prev_size == 1 && is_last_buffer {
-        //     let new_buffer_ptr = self.allocate_buffer(temp_tail);
-        //     println!("allocating new memory");
-        //     if temp_tail
-        //         .next
-        //         .compare_exchange(
-        //             ptr::null_mut(),
-        //             new_buffer_ptr,
-        //             Ordering::SeqCst,
-        //             Ordering::SeqCst,
-        //         )
-        //         .is_ok()
-        //     {
-        //         self.tail_of_queue.store(new_buffer_ptr, Ordering::SeqCst);
-        //     } else {
-        //         MpscQueue::drop_buffer(new_buffer_ptr);
-        //     }
-        // }
-        // Ok(())
-
-        loop {
-            // The buffer in which we eventually insert into.
-            let mut temp_tail = unsafe { &mut *self.tail_of_queue.load(Acquire) };
-            // The number of items in the queue without the current buffer.
-            let mut prev_size = self.size_without_buffer(temp_tail);
-            println!("prev_size={prev_size} pos={} head={} nodes={:?}", temp_tail.pos, temp_tail.head, temp_tail.nodes);
-
-            // The location is in a previous buffer. We need to track back to that one.
-            while location < prev_size {
-                is_last_buffer = false;
-                temp_tail = unsafe { &mut *temp_tail.prev };
-                prev_size -= self.buffer_size;
-            }
-
-            // The current capacity of the queue.
-            let global_size = self.buffer_size + prev_size;
-
-            if prev_size <= location && location < global_size {
-                // We found the right buffer to insert.
-                return self.insert(data, location - prev_size, temp_tail, is_last_buffer);
-            }
-
-            // The location is in the next buffer. We need to allocate a new buffer
-            // which becomes the new tail of the queue.
-            if location >= global_size {
-                let next = temp_tail.next.load(Ordering::Acquire);
-
-                if next.is_null() {
-                    // No next buffer, allocate a new one.
-                    let new_buffer_ptr = self.allocate_buffer(temp_tail);
-                    // Try setting the successor of the current buffer to point to our new buffer.
-                    if temp_tail
-                        .next
-                        .compare_exchange(
-                            ptr::null_mut(),
-                            new_buffer_ptr,
-                            Ordering::SeqCst,
-                            Ordering::SeqCst,
-                        )
-                        .is_ok()
-                    {
-                        // Only one thread comes here and updates the next pointer.
-                        temp_tail.next.store(new_buffer_ptr, Ordering::Release)
-                    } else {
-                        // CAS was unsuccessful, we can drop our buffer.
-                        // See the insert method for an optimization that
-                        // reduces contention and wasteful allocations.
-                        MpscQueue::drop_buffer(new_buffer_ptr)
+        let mut num_elements = self.buffer_size * temp_tail.pos;
+        // println!(
+        //     "location={location} num_elem={num_elements}, prev_buffer={} pos={}",
+        //     self.size_without_buffer(temp_tail),
+        //     temp_tail.pos
+        // );
+        while location >= num_elements {
+            let next = temp_tail.next.load(Acquire);
+            // println!("{location} {num_elements} {}", next.is_null());
+            // create new buffer if reached end of tail buffer
+            if next.is_null() {
+                let new_buffer_ptr = self.allocate_buffer(temp_tail);
+                match temp_tail.next.compare_exchange(
+                    ptr::null_mut(),
+                    new_buffer_ptr,
+                    SeqCst,
+                    SeqCst,
+                ) {
+                    Ok(_) => {
+                        // println!("created and moving up");
+                        self.tail_of_queue.store(new_buffer_ptr, SeqCst);
                     }
+                    Err(new_ptr) => {
+                        // println!("failed to create but moving up");
+                        MpscQueue::drop_buffer(new_buffer_ptr);
+                        // temp_tail = unsafe { &mut *new_ptr };
+                    }
+                }
+            } else {
+                // println!("there is already a pointer");
+                // let new_tail = unsafe { &mut *next };
+                // self.tail_of_queue
+                //     .compare_exchange(temp_tail, new_tail, SeqCst, SeqCst)
+                //     .ok();
+            }
+            temp_tail = unsafe { &mut *self.tail_of_queue.load(Acquire) };
+            num_elements = self.buffer_size * temp_tail.pos;
+        }
+
+        let mut prev_size = self.size_without_buffer(temp_tail);
+        while location < prev_size {
+            // println!("prev - {} {}", location, prev_size);
+            temp_tail = unsafe { &mut *temp_tail.prev };
+            // println!("{}", temp_tail.pos);
+            prev_size = self.size_without_buffer(temp_tail);
+            is_last_buffer = false;
+        }
+
+        let n = &mut temp_tail.nodes[location - prev_size];
+        if n.is_set.load(Acquire) == Empty {
+            unsafe {
+                n.set_data(data);
+                n.set_state(Set);
+            }
+            if location - prev_size == 1 && is_last_buffer {
+                let new_buffer_ptr = self.allocate_buffer(temp_tail);
+                if temp_tail
+                    .next
+                    .compare_exchange(ptr::null_mut(), new_buffer_ptr, SeqCst, SeqCst)
+                    .is_err()
+                {
+                    MpscQueue::drop_buffer(new_buffer_ptr);
                 } else {
-                    // If next is not null, we update the tail and proceed on the that buffer.
-                    self.tail_of_queue
-                        .compare_exchange_weak(
-                            temp_tail as *mut _,
-                            next,
-                            Ordering::SeqCst,
-                            Ordering::SeqCst,
-                        )
-                        .unwrap();
+                    self.tail_of_queue.store(new_buffer_ptr, SeqCst);
+                    // println!("storing new q");
                 }
             }
         }
+
+        Ok(())
+
+        // loop {
+        //     // The buffer in which we eventually insert into.
+        //     let mut temp_tail = unsafe { &mut *self.tail_of_queue.load(Acquire) };
+        //     // The number of items in the queue without the current buffer.
+        //     let mut prev_size = self.size_without_buffer(temp_tail);
+        //     // println!("prev_size={prev_size} pos={} head={} nodes={:?}", temp_tail.pos, temp_tail.head, temp_tail.nodes);
+        //
+        //     // The location is in a previous buffer. We need to track back to that one.
+        //     while location < prev_size {
+        //         is_last_buffer = false;
+        //         temp_tail = unsafe { &mut *temp_tail.prev };
+        //         prev_size -= self.buffer_size;
+        //     }
+        //
+        //     // The current capacity of the queue.
+        //     let global_size = self.buffer_size + prev_size;
+        //
+        //     if prev_size <= location && location < global_size {
+        //         // We found the right buffer to insert.
+        //         return self.insert(data, location - prev_size, temp_tail, is_last_buffer);
+        //     }
+        //
+        //     // The location is in the next buffer. We need to allocate a new buffer
+        //     // which becomes the new tail of the queue.
+        //     if location >= global_size {
+        //         let next = temp_tail.next.load(Ordering::Acquire);
+        //
+        //         if next.is_null() {
+        //             // No next buffer, allocate a new one.
+        //             let new_buffer_ptr = self.allocate_buffer(temp_tail);
+        //             // Try setting the successor of the current buffer to point to our new buffer.
+        //             if temp_tail
+        //                 .next
+        //                 .compare_exchange(
+        //                     ptr::null_mut(),
+        //                     new_buffer_ptr,
+        //                     Ordering::SeqCst,
+        //                     Ordering::SeqCst,
+        //                 )
+        //                 .is_ok()
+        //             {
+        //                 // Only one thread comes here and updates the next pointer.
+        //                 temp_tail.next.store(new_buffer_ptr, Ordering::Release)
+        //             } else {
+        //                 // CAS was unsuccessful, we can drop our buffer.
+        //                 // See the insert method for an optimization that
+        //                 // reduces contention and wasteful allocations.
+        //                 MpscQueue::drop_buffer(new_buffer_ptr)
+        //             }
+        //         } else {
+        //             // If next is not null, we update the tail and proceed on the that buffer.
+        //             self.tail_of_queue
+        //                 .compare_exchange_weak(
+        //                     temp_tail as *mut _,
+        //                     next,
+        //                     Ordering::SeqCst,
+        //                     Ordering::SeqCst,
+        //                 )
+        //                 .ok();
+        //         }
+        //     }
+        // }
     }
 
     pub fn dequeue(&self) -> Option<T> {
         // The buffer from which we eventually dequeue from.
-        let mut temp_tail;
+        let curr_head = unsafe { &mut *self.head_of_queue.get() };
+        let node = &mut curr_head.nodes[curr_head.head];
+        while node.is_set.load(Acquire) == Handled {
+            curr_head.head += 1;
 
+        }
+
+        let mut temp_tail;
         loop {
-            temp_tail = unsafe { &mut *self.tail_of_queue.load(Ordering::SeqCst) };
+            temp_tail = unsafe { &mut *self.tail_of_queue.load(SeqCst) };
             // The number of items in the queue without the current buffer.
             let prev_size = self.size_without_buffer(temp_tail);
 
             let head = &mut unsafe { &mut *self.head_of_queue.get() }.head;
             let head_is_tail = self.head_of_queue.get() == temp_tail;
-            let head_is_empty = *head == self.tail.load(Ordering::Acquire) - prev_size;
+            let head_is_empty = *head == self.tail.load(Acquire) - prev_size;
 
             // The queue is empty.
             if head_is_tail && head_is_empty {
