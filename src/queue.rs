@@ -217,7 +217,7 @@ impl<T, const N: usize> JiffyQueue<T, N> {
             n = &head_buf.nodes[i];
         }
         self.dequeue_index.set(i);
-        if self.is_empty() {
+        if self.reached_end() {
             return None;
         }
         // eliminated handled case, now only have cases where head is empty or set.
@@ -229,16 +229,9 @@ impl<T, const N: usize> JiffyQueue<T, N> {
                 None => return None,
             },
             NodeStatus::Set => {
-                let node = &mut head_buf.nodes[i];
-                let data = node.get_data();
-                // if reached the end, remove buffer.
-                i += 1;
-                if i >= N {
-                    self.remove_head_buffer();
-                    i = 0;
-                }
-                self.dequeue_index.set(i);
-                return Some(data);
+                // if we are on a Set node, we know previous nodes are handled, can simply return this.
+                // defers advancing and dropping buffer for next poll iteration for simplicity
+                return Some(head_buf.nodes[i].get_data());
             }
             NodeStatus::Handled => panic!("this node should have been handled!"),
         };
@@ -250,11 +243,14 @@ impl<T, const N: usize> JiffyQueue<T, N> {
                     None => break,
                 }
         }
+        // caveat in my implementation, even if scan loops enough times to have the node adjacent to head
+        // become Set status, it does not handle the buffer replacing. we will defer that to next poll loop for simplicity
         let node = unsafe { &mut (*found_buf).nodes[found_index] };
         let data = node.get_data();
         Some(data)
     }
 
+    /// Function to remove the head buffer on fully handled cases, similar to fold but prev is null.
     fn remove_head_buffer(&self) {
         let head_ptr = self.head_ptr.get();
         // next_buf can never be null, enqueue pre-emptively creates buffer
@@ -321,6 +317,7 @@ impl<T, const N: usize> JiffyQueue<T, N> {
         None
     }
 
+    /// Search for [`Set`] nodes between start and tail.
     fn search(
         &self,
         start: *mut BufferList<T, N>,
@@ -352,14 +349,32 @@ impl<T, const N: usize> JiffyQueue<T, N> {
         }
     }
 
+    /// naive implementation, we will just loop over entire queue and check how many elements are filled.
     pub fn len(&self) -> usize {
-        let head_buf = unsafe { &*self.head_ptr.get() };
-        let insert_index = self.insert_index.load(Acquire);
-        insert_index - (N * head_buf.queue_index + self.dequeue_index.get())
+        let mut head_buf = unsafe { &*self.head_ptr.get() };
+        let mut cnt = 0;
+        loop {
+            for i in &head_buf.nodes {
+                if i.status.load(Acquire) == NodeStatus::Set as u8 {
+                    cnt += 1;
+                }
+            }
+            let head_buf_ptr = head_buf.next.load(Acquire);
+            if head_buf_ptr.is_null() {
+                break cnt;
+            }
+            head_buf = unsafe { &*head_buf_ptr };
+        }
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+    /// Check whether head >= tail overlapping, there are nothing left to iterate on.
+    fn reached_end(&self) -> bool {
+        let tail_ptr = self.tail_ptr.load(Acquire);
+        self.head_ptr.get() == tail_ptr
+            && self.dequeue_index.get() >= self.insert_index.load(Acquire)
     }
 }
 
@@ -460,11 +475,11 @@ mod tests {
         let mut queue = JiffyQueue::<u8, BUFFER_SIZE>::new();
         assert!(queue.is_empty());
         assert_eq!(queue.len(), 0);
-
         for i in 0..7 {
             queue.push(i + 1);
             assert_eq!(queue.len(), i as usize + 1);
         }
+        assert_eq!(queue.len(), 7);
         for i in 0..7 {
             assert_eq!(queue.poll(), Some(i + 1));
             assert_eq!(queue.len(), 7 - (i + 1) as usize);
