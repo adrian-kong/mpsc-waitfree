@@ -1,6 +1,5 @@
 use std::cell::Cell;
-use std::collections::VecDeque;
-use std::fmt::{Debug, Error, Formatter};
+use std::fmt::{Debug, Formatter};
 use std::mem::MaybeUninit;
 use std::ptr::null_mut;
 use std::sync::atomic::Ordering::{Acquire, SeqCst};
@@ -118,8 +117,8 @@ pub struct JiffyQueue<T, const N: usize> {
     /// Index in head ptr to be dequeued. This is bounded between 0 to N.
     /// To be only mutated inside [`poll()`], since single consumer queue.
     dequeue_index: Cell<usize>,
-    /// Garbage collection, only mutated by single consumer during poll operation.
-    gc: VecDeque<*mut BufferList<T, N>>,
+    // /// Garbage collection, only mutated by single consumer during poll operation.
+    // gc: VecDeque<*mut BufferList<T, N>>,
 }
 
 unsafe impl<T, const N: usize> Send for JiffyQueue<T, N> {}
@@ -135,7 +134,7 @@ impl<T, const N: usize> JiffyQueue<T, N> {
             tail_ptr: AtomicPtr::new(head),
             insert_index: AtomicUsize::default(),
             dequeue_index: Cell::new(0),
-            gc: VecDeque::default(),
+            // gc: VecDeque::default(),
         }
     }
 
@@ -168,7 +167,7 @@ impl<T, const N: usize> JiffyQueue<T, N> {
 
         // if the insertion index is beyond the current number of elements, due to data contention,
         // we need to insert using CAS primitive an additional buffer list at tail
-        while insert_at >= num_elements + 1 {
+        while insert_at > num_elements {
             if curr_buffer.next.load(Acquire).is_null() {
                 self.add_tail(curr_buffer);
             }
@@ -385,6 +384,7 @@ impl<T> Receiver<T> {
     }
 }
 
+/// return queue just for verification purposes
 pub fn channel<T>() -> (
     Sender<T>,
     Receiver<T>,
@@ -400,7 +400,7 @@ pub fn channel<T>() -> (
 
 #[cfg(test)]
 mod tests {
-    use crate::JiffyQueue;
+    use crate::queue::JiffyQueue;
     use std::sync::atomic::Ordering::Acquire;
 
     #[test]
