@@ -250,18 +250,6 @@ impl<T, const N: usize> JiffyQueue<T, N> {
         Some(data)
     }
 
-    /// Function to remove the head buffer on fully handled cases, similar to fold but prev is null.
-    fn remove_head_buffer(&self) {
-        let head_ptr = self.head_ptr.get();
-        // next_buf can never be null, enqueue pre-emptively creates buffer
-        let next_buf = unsafe { &*head_ptr }.next.load(Acquire);
-        self.head_ptr.set(next_buf);
-        unsafe {
-            (*next_buf).prev = null_mut();
-            drop(Box::from_raw(head_ptr));
-        }
-    }
-
     /// Fold buffer in the middle of the queue,
     /// given Buffer B, with A - B - C neighbouring buffers,
     /// this becomes A - C and returns prev buffer of C, which is A.
@@ -367,6 +355,7 @@ impl<T, const N: usize> JiffyQueue<T, N> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -374,7 +363,7 @@ impl<T, const N: usize> JiffyQueue<T, N> {
     fn reached_end(&self) -> bool {
         let tail_ptr = self.tail_ptr.load(Acquire);
         self.head_ptr.get() == tail_ptr
-            && self.dequeue_index.get() >= self.insert_index.load(Acquire)
+            && self.dequeue_index.get() >= (self.insert_index.load(Acquire) % N)
     }
 }
 
@@ -420,7 +409,7 @@ mod tests {
 
     #[test]
     pub fn push_single_buffer() {
-        let mut queue = JiffyQueue::<u8, 4>::new();
+        let queue = JiffyQueue::<u8, 4>::new();
         assert!(queue.is_empty());
         queue.push(1);
         assert_eq!(queue.dequeue_index.get(), 0);
@@ -437,7 +426,7 @@ mod tests {
 
     #[test]
     pub fn pop_single_buffer() {
-        let mut queue = JiffyQueue::<u8, 4>::new();
+        let queue = JiffyQueue::<u8, 4>::new();
         assert!(queue.is_empty());
         assert_eq!(queue.len(), 0);
         for i in 0..4 {
@@ -453,9 +442,8 @@ mod tests {
 
     #[test]
     pub fn pop_single_buffer_empty() {
-        let mut queue = JiffyQueue::<u8, 4>::new();
+        let queue = JiffyQueue::<u8, 4>::new();
         assert!(queue.is_empty());
-        assert_eq!(queue.len(), 0);
         for i in 0..4 {
             queue.push(i + 1);
             assert_eq!(queue.len(), i as usize + 1);
@@ -472,7 +460,7 @@ mod tests {
     #[test]
     pub fn pop_multiple_buffers() {
         const BUFFER_SIZE: usize = 4;
-        let mut queue = JiffyQueue::<u8, BUFFER_SIZE>::new();
+        let queue = JiffyQueue::<u8, BUFFER_SIZE>::new();
         assert!(queue.is_empty());
         assert_eq!(queue.len(), 0);
         for i in 0..7 {
@@ -489,7 +477,7 @@ mod tests {
 
     #[test]
     pub fn test_push() {
-        let mut queue = JiffyQueue::<u8, 4>::new();
+        let queue = JiffyQueue::<u8, 4>::new();
 
         // let head = queue.head;
         // assert!(!head.is_null(), "head is initialized on construction");
