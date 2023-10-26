@@ -67,7 +67,7 @@ pub struct Node<T> {
 
 impl<T> std::fmt::Debug for Node<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.is_set.load(Acquire)).unwrap();
+        write!(f, "{:?}", State::from(self.is_set.load(Acquire))).unwrap();
         Ok(())
     }
 }
@@ -250,19 +250,19 @@ impl<T> MpscQueue<T> {
                 n.set_data(data);
                 n.set_state(Set);
             }
-            if location - prev_size == 1 && is_last_buffer {
-                let new_buffer_ptr = self.allocate_buffer(temp_tail);
-                if temp_tail
-                    .next
-                    .compare_exchange(ptr::null_mut(), new_buffer_ptr, SeqCst, SeqCst)
-                    .is_err()
-                {
-                    MpscQueue::drop_buffer(new_buffer_ptr);
-                } else {
-                    self.tail_of_queue.store(new_buffer_ptr, SeqCst);
-                    // println!("storing new q");
-                }
-            }
+            // if location - prev_size == 1 && is_last_buffer {
+            //     let new_buffer_ptr = self.allocate_buffer(temp_tail);
+            //     if temp_tail
+            //         .next
+            //         .compare_exchange(ptr::null_mut(), new_buffer_ptr, SeqCst, SeqCst)
+            //         .is_err()
+            //     {
+            //         MpscQueue::drop_buffer(new_buffer_ptr);
+            //     } else {
+            //         self.tail_of_queue.store(new_buffer_ptr, SeqCst);
+            //         // println!("storing new q");
+            //     }
+            // }
         }
 
         Ok(())
@@ -333,13 +333,6 @@ impl<T> MpscQueue<T> {
 
     pub fn dequeue(&self) -> Option<T> {
         // The buffer from which we eventually dequeue from.
-        let curr_head = unsafe { &mut *self.head_of_queue.get() };
-        let node = &mut curr_head.nodes[curr_head.head];
-        while node.is_set.load(Acquire) == Handled {
-            curr_head.head += 1;
-
-        }
-
         let mut temp_tail;
         loop {
             temp_tail = unsafe { &mut *self.tail_of_queue.load(SeqCst) };
